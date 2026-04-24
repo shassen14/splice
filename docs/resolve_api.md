@@ -3,16 +3,89 @@ tags: [davinci-resolve, api, reference]
 type: reference
 created: 2026-04-24
 updated: 2026-04-24
-resolve_version: 20.0.0.49
+resolve_version: 20.3.2.9
+gist_reference: https://gist.github.com/mhadifilms/2b84d469135315793220dbf2226cbe63
 ---
 
 # DaVinci Resolve Python Scripting API — Field Guide
 
-> Living reference backed by `scripts/probe_resolve.py` runs.
+> Living reference backed by `scripts/probe` runs.
 > Every claim is tagged: **[confirmed]** = seen in probe output, **[from code]** = used in passes.py and working in practice, **[untested]** = not yet probed.
 > Re-run probe after Resolve updates and reconcile.
 
-**Resolve version probed: 20.0.0.49**
+**Resolve version probed: 20.3.2.9**
+`GetVersion()` → `[20, 3, 2, 9, '']`
+
+---
+
+## Requirements & Platform Setup
+
+### Studio requirement
+
+**DaVinci Resolve Studio (paid) is required.** The free version does not expose the
+scripting API. The app must be running with a project open before any script can connect.
+Headless mode is also supported: launch Resolve with `-nogui` for server/CI use.
+
+### Platform paths
+
+The `DaVinciResolveScript` module and its native library live at platform-specific locations
+that must be on `PYTHONPATH` and the dynamic library search path.
+
+**macOS:**
+```
+API module:  /Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules/
+Library:     /Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so
+```
+
+Set in shell or `.env`:
+```bash
+export PYTHONPATH="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules:$PYTHONPATH"
+export DYLD_LIBRARY_PATH="/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion:$DYLD_LIBRARY_PATH"
+```
+
+**Windows:**
+```
+API module:  %PROGRAMDATA%\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules\
+Library:     C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll
+```
+
+Set in PowerShell or System Environment Variables:
+```powershell
+$env:PYTHONPATH = "$env:PROGRAMDATA\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules;$env:PYTHONPATH"
+```
+The DLL directory is typically already on `PATH` after Resolve installs.
+
+### Connection
+
+```python
+import DaVinciResolveScript as dvr
+resolve = dvr.scriptapp("Resolve")
+# resolve is None if Resolve is not running or no Studio license
+```
+
+The `probe/__main__.py` raises `SystemExit` with a diagnostic if `import DaVinciResolveScript` fails —
+check `PYTHONPATH` first.
+
+### macOS LAN-binding issue
+
+On some macOS configurations the Resolve IPC socket binds to a LAN IP rather than
+`127.0.0.1`, causing `scriptapp("Resolve")` to hang. If the connection stalls:
+- Run `ifconfig | grep "inet "` to find the active LAN IP
+- Or use `pinghosts('')` (Fusion scripting helper) to locate the bound address
+
+Implement a threaded timeout wrapper around `scriptapp()` to avoid indefinite hangs:
+```python
+import concurrent.futures
+def connect(timeout=5.0):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(dvr.scriptapp, "Resolve")
+        return fut.result(timeout=timeout)
+```
+
+### Version delta: 20.0.x → 20.3.2
+
+Probed on **20.3.2.9**. `GetTimelineByName()` was mentioned in the gist as new in 20.3
+but was not in the probed candidates list — add it to a future probe run to confirm.
 
 ---
 
@@ -499,12 +572,141 @@ for folder in root.GetSubFolderList():
 
 ---
 
+## Color API
+
+### TimelineItem — color methods
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `GetNodeGraph()` | NodeGraph | **[confirmed]** — present on both video and audio items |
+| `GetLUT()` | unknown | **[confirmed present, not called]** |
+| `SetLUT()` | unknown | **[confirmed present, not called]** — args unknown |
+| `CopyGrades()` | unknown | **[confirmed present, not called]** — args unknown |
+
+**All absent on TimelineItem:** `AutoBalance`, `AutoColor`, `ColorBalance`, `ResetGrade`,
+`GetCurrentColorVersion`, `GetColorVersionList`, `AddColorVersion`, `LoadColorVersion`,
+`GrabStill`, `GrabAllStills`, `ApplyGradeFromDRX`.
+
+Auto white balance has **no API surface** — the Color page auto-balance button is not
+scriptable. `AWBPass` cannot be implemented via the Python API.
+
+### NodeGraph object
+
+Returned by `TimelineItem.GetNodeGraph()`.
+
+| Method | Notes |
+|--------|-------|
+| `SetLUT(?)` | **[confirmed present]** — signature unknown; likely `SetLUT(path)` or `SetLUT(node_index, path)` |
+| `GetLUT(?)` | **[confirmed present]** — signature unknown |
+| `ApplyGradeFromDRX(?)` | **[confirmed present]** — signature unknown; this is how grade presets apply |
+| `GetNodeLabel()` | **[confirmed present]** — returns label of… unclear which node |
+| `SetNodeEnabled()` | **[confirmed present]** |
+
+**All absent on NodeGraph:** `GetNodeCount`, `GetNode`, `GetNodeByIndex`, `AddNode`,
+`DeleteNode`, `ExportLUT`, `Reset`, `SetNodeLabel`, `GetNodeEnabled`.
+
+**Critical limitation:** There is no `GetNodeCount` or `GetNode(index)`. You cannot
+iterate or address individual nodes in the graph. `SetLUT` and `GetLUT` operate at
+the graph level — it is unclear whether they target node 1 or the whole pipeline.
+This limits fine-grained per-node control (e.g. setting a LUT on a specific corrector
+node vs. the input node).
+
+### LUTPass implementation path
+
+```python
+ng = video_item.GetNodeGraph()
+ng.SetLUT(lut_path)     # confirmed callable — args and behavior need verification
+```
+
+`SetLUT` and `GetLUT` on `TimelineItem` also exist (separate from the node graph call).
+The relationship between these two is unconfirmed — probe with a known LUT path to see
+which actually applies it and where it shows in the Resolve UI.
+
+### Gallery
+
+```python
+gallery = project.GetGallery()           # confirmed
+albums = gallery.GetGalleryStillAlbums() # confirmed — returns list of album objects
+album = albums[0]
+stills = album.GetStills()              # confirmed — returns list of still objects
+```
+
+Gallery methods present: `GetCurrentStillAlbum`, `SetCurrentStillAlbum`,
+`GetGalleryStillAlbums`. Album methods: `GetStills`, `GetLabel`, `SetLabel`,
+`ImportStills`, `ExportStills`, `DeleteStills`.
+
+**Still objects have no methods** — `GetLabel` and `SetLabel` are absent on the still
+object itself. There is no API to read a still's name or match it to a named preset.
+Grade presets saved in the gallery cannot be identified by name through the API.
+
+`ApplyGradeFromDRX` is on the **NodeGraph** object, not on Gallery stills. To apply
+a grade you need a `.drx` file path, not a gallery still reference.
+
+---
+
+## Keyframe API
+
+### Per-frame transform writes — confirmed not available
+
+All keyframe write methods are **absent** on `TimelineItem` in 20.3.2:
+
+```
+AddKeyframe, DeleteKeyframeAtFrame, SetPropertyKeyframe,
+SetPropertyKeyframeValue, SetPropertyKeyframes, SetKeyframeEnabled,
+SetPropertyAnimated, GetDynamicZoomEase, SetDynamicZoomEase
+```
+
+Attempts to write per-frame values via `SetProperty` also fail:
+
+```python
+item.SetProperty("Pan", {frame: 0.1})       # → False (no effect)
+item.SetProperty("Pan", {str(frame): 0.1})  # → False
+item.SetProperty("Pan", (frame, 0.1))       # → False
+```
+
+**Conclusion: animated per-frame keyframes for inspector transforms cannot be written
+through the Python API.** Subject tracking (CSRTTracker generates keyframe data) has
+no confirmed write path to Resolve.
+
+### GetProperty does accept a frame argument
+
+```python
+item.GetProperty("Pan", frame)   # → False when no animation is set on the property
+```
+
+`False` (not `None`) means the frame argument is accepted — the API recognises it but
+returns `False` because no keyframe animation exists on the property. When animation
+IS set (e.g. manually in the Inspector), this may return the per-frame value. **Not
+yet tested with an animated clip.**
+
+### Static transform read/write — confirmed working
+
+All inspector transform properties round-trip correctly (set → read back = same value):
+
+| Key | Confirmed |
+|-----|-----------|
+| `Pan` | read/write ✓ |
+| `Tilt` | read/write ✓ |
+| `ZoomX` | read/write ✓ |
+| `ZoomY` | read/write ✓ |
+| `RotationAngle` | read/write ✓ |
+
+Static reframe (one fixed crop/zoom for the whole clip) is fully supported.
+Smooth animated tracking is not.
+
+---
+
 ## Known Limitations
 
-### 1. Audio TimelineItem properties are write-only (at best)
+### 1. Audio volume is write-only — confirmed broken in 20.3.2
 
-`GetProperty` returns nothing for audio clips. `SetProperty("volume", db)` writes
-silently — no confirmation. Must verify visually in Resolve UI.
+`GetProperty` returns `{}` for audio clips; all keyed lookups return `None`.
+This is unchanged from 20.0.0.49. `GetVolume`/`SetVolume` do not exist.
+`SetProperty("volume", db)` does not raise, but the value cannot be read back.
+
+**Design implication for NormalizePass:** always measure via rendered WAV,
+treat the existing clip volume as unknown, and reset all clips to 0 dB before
+measuring so each run is idempotent. Do NOT add a delta to the unreadable current value.
 
 ### 2. No Fairlight automation keyframe access
 
@@ -546,16 +748,22 @@ Always glob `f"{stem}*.wav"` rather than assuming an exact filename.
 
 | # | Question | Status |
 |---|----------|--------|
-| 1 | Does `SetProperty("volume", db)` actually change clip volume in Resolve UI? | **Unverified** — probe shows read fails; needs manual UI check after pass |
-| 2 | What is the full dict returned by `video_item.GetProperty()`? | Partially seen — ZoomX/Y, Pan, Tilt, opacity confirmed; full key list needed |
-| 3 | Does `GetIsTrackEnabled(type, idx)` work? What does it return? | Confirmed present, not yet called |
-| 4 | What does `GetNodeGraph()` return? How to access Fusion comps? | Not yet probed |
-| 5 | What are the 6 sub-folders in the MediaPool root? | Folder.GetName() calls pending |
-| 6 | Does `TranscribeAudio` on MediaPoolItem trigger Resolve's AI transcription? What args? | Not probed |
-| 7 | What does `GetVersion()` return vs `GetVersionString()`? | Not called |
-| 8 | `GetRenderJobStatus` — is the done value `"Complete"` or `"Completed"`? | Code uses `"Complete"` — verify against a real render |
-| 9 | Can `SetProperty` on video items round-trip? (Set ZoomX, read it back?) | Not yet tested |
-| 10 | What are the valid `SetRenderSettings` keys beyond the 5 confirmed ones? | Full key list from Resolve docs or trial |
+| 1 | Does `SetProperty("volume", db)` actually commit the value in the Resolve UI? | **Unverified visually** — readback confirmed broken; needs manual UI check after a pass run |
+| 2 | What is the full dict returned by `video_item.GetProperty()`? | Pan, Tilt, ZoomX/Y, ZoomGang, RotationAngle, AnchorPointX/Y, opacity confirmed — full list needs a clip with all properties set |
+| 3 | `GetIsTrackEnabled` | **[confirmed]** → `True` / `False` |
+| 4 | `GetNodeGraph()` | **[confirmed]** — see Color API section |
+| 5 | MediaPool folder structure | **[confirmed]** — 00_Timelines / 01_Footage / 02_Audio / 03_Graphics / 04_Project_Files / 05_Exports |
+| 6 | `TranscribeAudio` args and behavior | Not probed |
+| 7 | `GetVersion()` vs `GetVersionString()` | **[confirmed]** — `GetVersion()` → `[20, 3, 2, 9, '']`; `GetVersionString()` → `'20.3.2.9'` |
+| 8 | `GetRenderJobStatus` — done value `"Complete"` or `"Completed"`? | Code uses `"Complete"` — verify against a real render |
+| 9 | `SetProperty` round-trip on video items | **[confirmed]** — Pan, Tilt, ZoomX, ZoomY, RotationAngle all round-trip correctly |
+| 10 | Valid `SetRenderSettings` keys beyond the 5 confirmed | Full key list from Resolve docs or trial |
+| 11 | `NodeGraph.SetLUT(?)` — exact signature and which node it targets | Not yet called with args |
+| 12 | `NodeGraph.ApplyGradeFromDRX(?)` — signature, and what does it accept (path? still object?) | Not yet called |
+| 13 | `GetProperty(key, frame)` — does it return a value (not `False`) when animation IS set? | Tested only on un-animated clips; `False` = no keyframe at that frame |
+| 14 | Does `GetProperty(key)` return a `{frame: value}` dict when animation is set on the property? | Would unlock read-back of existing keyframe data |
+| 15 | `TimelineItem.SetLUT()` vs `NodeGraph.SetLUT()` — are these the same operation? | Both confirmed present but not yet called |
+| 16 | `CopyGrades()` on TimelineItem — what does it accept? Can it copy from a still? | Not probed |
 
 ---
 
@@ -563,7 +771,7 @@ Always glob `f"{stem}*.wav"` rather than assuming an exact filename.
 
 ```bash
 cd /Users/samir/Documents/projects/media_os/splice
-uv run python scripts/probe_resolve.py 2>&1 | tee docs/probe_output_$(date +%Y%m%d).txt
+uv run python -m scripts.probe 2>&1 | tee docs/probe_output_$(date +%Y%m%d).txt
 ```
 
 Pipe to a dated file so each run is preserved for comparison across Resolve versions.

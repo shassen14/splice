@@ -4,10 +4,10 @@ DaVinci Resolve scripting API probe.
 Run with Resolve open, a project loaded, and at least one timeline active:
 
     cd /Users/samir/Documents/projects/media_os/splice
-    uv run python scripts/probe
+    uv run python -m scripts.probe
 
 Pipe to a file to preserve the run:
-    uv run python scripts/probe 2>&1 | tee docs/probe_output_$(date +%Y%m%d).txt
+    uv run python -m scripts.probe 2>&1 | tee docs/probe_output_$(date +%Y%m%d).txt
 """
 from __future__ import annotations
 
@@ -21,8 +21,18 @@ except ImportError:
         "Is Resolve running and PYTHONPATH set to its scripting directory?"
     )
 
-from . import app, items, media_pool, pm, project, timeline
+from . import app, color, items, keyframes, media_pool, pm, project, timeline
 from ._fmt import W
+
+
+def _first_video_item(tl):
+    """Return the first video TimelineItem found, or None."""
+    n = tl.GetTrackCount("video") if getattr(tl, "GetTrackCount", None) else 0
+    for i in range(1, n + 1):
+        clips = tl.GetItemListInTrack("video", i)
+        if clips:
+            return clips[0]
+    return None
 
 
 def main() -> None:
@@ -47,6 +57,14 @@ def main() -> None:
     items.probe_video(tl)
 
     media_pool.probe(proj)
+
+    # Color and keyframe probes require a video item
+    video_item = _first_video_item(tl)
+    if video_item is None:
+        print("\n  [color/keyframe probes skipped — no video clips on timeline]")
+    else:
+        color.probe(video_item, proj)
+        keyframes.probe(video_item)
 
     print(f"\n{'=' * W}")
     print("  Probe complete.")

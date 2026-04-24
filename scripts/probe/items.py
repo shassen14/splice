@@ -2,13 +2,29 @@
 from __future__ import annotations
 
 from . import mpi as mpi_probe
-from ._fmt import call, section, subsection
+from ._fmt import call, probe_methods, section, subsection
 
 _AUDIO_PROP_KEYS = [
     "volume", "Volume", "pan", "Pan",
     "Enabled", "enabled", "Clip Volume", "AudioLevel",
     "gain", "Gain", "level", "Level",
     "pitchAdjust", "speed", "compositeMode", "opacity",
+    # Additional candidates for 20.3+
+    "clipVolume", "audioLevel", "clipLevel", "dBFS",
+    "VolumeDB", "volumeDB", "FaderValue", "faderValue",
+]
+
+# Extra method candidates added in 20.3 or not yet probed
+_AUDIO_METHOD_CANDIDATES = [
+    "GetProperty", "SetProperty",
+    "GetVolume", "SetVolume",
+    "GetStart", "GetEnd", "GetDuration",
+    "GetName", "GetMediaPoolItem", "GetLinkedItems",
+    "GetFlagList", "AddFlag", "ClearFlags",
+    "GetClipColor", "SetClipColor",
+    "GetMarkers", "AddMarker",
+    "GetFusionCompCount",
+    "GetNodeGraph",
 ]
 
 _VIDEO_PROP_KEYS = [
@@ -60,6 +76,41 @@ def _probe_mpi(item) -> None:
     mpi_probe.probe(mpi)
 
 
+def _probe_audio_volume_roundtrip(item) -> None:
+    print()
+    print("  [volume round-trip] Testing SetProperty/GetProperty on audio item:")
+
+    # Step 1: read current value
+    current = item.GetProperty("volume")
+    print(f"    GetProperty('volume') before write: {current!r}")
+
+    # Step 2: set to a known value
+    try:
+        item.SetProperty("volume", -6.0)
+    except Exception as e:
+        print(f"    SetProperty('volume', -6.0) → FAIL: {e}")
+        return
+
+    # Step 3: read back
+    readback = item.GetProperty("volume")
+    print(f"    GetProperty('volume') after SetProperty(-6.0): {readback!r}")
+
+    if readback is not None:
+        print("    *** VOLUME READBACK WORKS IN THIS VERSION ***")
+    else:
+        print("    *** VOLUME READBACK STILL BROKEN — write may still apply visually ***")
+
+    # Step 4: try 'Volume' (capital V)
+    item.SetProperty("Volume", -6.0)
+    readback_cap = item.GetProperty("Volume")
+    print(f"    GetProperty('Volume') [capital V] after SetProperty: {readback_cap!r}")
+
+    # Step 5: restore original
+    restore_val = float(current) if current is not None else 0.0
+    item.SetProperty("volume", restore_val)
+    print(f"    Restored to {restore_val}")
+
+
 def probe_audio(timeline) -> None:
     section("5. TimelineItem — audio tracks")
     n_audio = timeline.GetTrackCount("audio") or 0
@@ -75,20 +126,17 @@ def probe_audio(timeline) -> None:
         subsection(f"audio track {track_idx}  —  {clip_name!r}  ({len(items)} clips total)")
 
         print()
+        subsection(f"  Methods (track {track_idx})")
+        probe_methods(item, _AUDIO_METHOD_CANDIDATES)
+
+        print()
         _probe_timing(item)
 
         print()
         call("  GetProperty()", item.GetProperty)
         _probe_keyed_props(item, _AUDIO_PROP_KEYS)
 
-        print()
-        print("  [round-trip] SetProperty('volume', 0.0) → GetProperty('volume'):")
-        try:
-            item.SetProperty("volume", 0.0)
-            readback = item.GetProperty("volume")
-            print(f"    after SetProperty(0.0): GetProperty → {readback!r}")
-        except Exception as e:
-            print(f"    FAIL: {e}")
+        _probe_audio_volume_roundtrip(item)
 
         print()
         _probe_misc(item)
