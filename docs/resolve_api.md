@@ -579,8 +579,8 @@ for folder in root.GetSubFolderList():
 | Method | Returns | Notes |
 |--------|---------|-------|
 | `GetNodeGraph()` | NodeGraph | **[confirmed]** — present on both video and audio items |
-| `GetLUT()` | unknown | **[confirmed present, not called]** |
-| `SetLUT()` | unknown | **[confirmed present, not called]** — args unknown |
+| `GetLUT()` | `str` | **[confirmed]** — `ng.GetLUT()` → `None` when no LUT assigned; `ng.GetLUT(1)` → `''` |
+| `SetLUT(path)` | `bool` | **[confirmed callable, visual result unverified]** — returns `False` for bad path; may also accept `SetLUT(node_index, path)` |
 | `CopyGrades()` | unknown | **[confirmed present, not called]** — args unknown |
 
 **All absent on TimelineItem:** `AutoBalance`, `AutoColor`, `ColorBalance`, `ResetGrade`,
@@ -596,31 +596,32 @@ Returned by `TimelineItem.GetNodeGraph()`.
 
 | Method | Notes |
 |--------|-------|
-| `SetLUT(?)` | **[confirmed present]** — signature unknown; likely `SetLUT(path)` or `SetLUT(node_index, path)` |
-| `GetLUT(?)` | **[confirmed present]** — signature unknown |
-| `ApplyGradeFromDRX(?)` | **[confirmed present]** — signature unknown; this is how grade presets apply |
-| `GetNodeLabel()` | **[confirmed present]** — returns label of… unclear which node |
-| `SetNodeEnabled()` | **[confirmed present]** |
+| `SetLUT(path)` | `bool` | **[confirmed callable]** — `ng.SetLUT('/path.cube')` → `False` for bad path, likely `True` for valid. Also accepts `ng.SetLUT(node_index, path)` |
+| `GetLUT()` | `str\|None` | **[confirmed]** — `None` when no LUT; `ng.GetLUT(1)` → `''` when node 1 has none |
+| `ApplyGradeFromDRX(path, node_index)` | `bool` | **[confirmed callable]** — `ng.ApplyGradeFromDRX('/path.drx', 1)` → `False` for bad path. 1-arg form returns `None` — use 2-arg form |
+| `GetNodeLabel()` | `str` | **[confirmed present, not called]** |
+| `SetNodeEnabled(bool)` | `bool` | **[confirmed present, not called]** |
 
 **All absent on NodeGraph:** `GetNodeCount`, `GetNode`, `GetNodeByIndex`, `AddNode`,
 `DeleteNode`, `ExportLUT`, `Reset`, `SetNodeLabel`, `GetNodeEnabled`.
 
-**Critical limitation:** There is no `GetNodeCount` or `GetNode(index)`. You cannot
-iterate or address individual nodes in the graph. `SetLUT` and `GetLUT` operate at
-the graph level — it is unclear whether they target node 1 or the whole pipeline.
-This limits fine-grained per-node control (e.g. setting a LUT on a specific corrector
-node vs. the input node).
+Individual nodes cannot be addressed. `SetLUT` and `ApplyGradeFromDRX` operate at
+the graph level (or target a specific node by 1-based index as the first arg).
 
-### LUTPass implementation path
+### SetLUT and ApplyGradeFromDRX — caveat
+
+Both calls return `False` for a nonexistent path, not a `TypeError` — the signatures
+are confirmed. Whether they **visually commit** in Resolve's Color page is unverified.
+The same silent-discard pattern seen with `SetProperty("volume")` on audio items may
+apply here. Treat as unverified until tested with a real `.cube` / `.drx` file and
+the Color page inspected manually.
 
 ```python
 ng = video_item.GetNodeGraph()
-ng.SetLUT(lut_path)     # confirmed callable — args and behavior need verification
+ng.SetLUT('/path/to/grade.cube')           # 1-arg: applies to graph
+ng.SetLUT(1, '/path/to/grade.cube')        # 2-arg: targets node 1
+ng.ApplyGradeFromDRX('/path/to/grade.drx', 1)  # path + node index
 ```
-
-`SetLUT` and `GetLUT` on `TimelineItem` also exist (separate from the node graph call).
-The relationship between these two is unconfirmed — probe with a known LUT path to see
-which actually applies it and where it shows in the Resolve UI.
 
 ### Gallery
 
@@ -668,6 +669,73 @@ item.SetProperty("Pan", (frame, 0.1))       # → False
 through the Python API.** Subject tracking (CSRTTracker generates keyframe data) has
 no confirmed write path to Resolve.
 
+---
+
+## Fusion API
+
+### TimelineItem Fusion methods
+
+| Method | Notes |
+|--------|-------|
+| `GetFusionCompCount()` | **[confirmed]** → `int` |
+| `GetFusionCompByIndex(i)` | **[confirmed]** — 1-based |
+| `AddFusionComp()` | **[confirmed]** — adds a new Fusion comp to the clip |
+| `ImportFusionComp(path)` | **[confirmed present]** — imports a `.comp` file |
+| `ExportFusionComp(path, index)` | **[confirmed present]** |
+
+**Absent:** `GetFusionCompList`, `DeleteFusionCompByIndex`, `LoadFusionComp`.
+
+`DeleteFusionCompByIndex` is absent — there is no API path to remove a Fusion comp
+once added. Remove manually in the Fusion page if needed.
+
+### Composition object
+
+`AddFusionComp()` / `GetFusionCompByIndex(1)` returns a composition object with:
+
+```
+FindTool, GetToolList, AddTool, GetAttrs, SetAttrs, Lock, Unlock, StartUndo, EndUndo
+```
+
+**Absent:** `GetCurrentTime`, `SetCurrentTime`.
+
+A fresh empty comp contains two default tools: `MediaIn1` and `MediaOut1`.
+
+### AddTool — confirmed working
+
+```python
+comp = video_item.AddFusionComp()
+transform = comp.AddTool("Transform")   # → tool object
+inputs = transform.GetInputList()       # → {1: Input, 2: Input, ...}
+center = transform["Center"]            # bracket access also works → Input object
+```
+
+`GetInputList()` and bracket access (`tool["Center"]`) both return Input objects.
+
+### Input objects — keyframe writes absent
+
+Input objects expose only `GetAttrs`. All keyframe and value methods are **absent**:
+
+```
+SetValueAtTime  GetValueAtTime  GetValue  SetValue
+```
+
+**The Fusion API as exposed through DaVinciResolveScript does not support keyframe
+writes.** The Input objects are read-only attribute proxies. This is not a Fusion
+limitation — it is a limitation of the DaVinciResolveScript IPC bridge, which exposes
+Fusion's structural API but not its animation SDK.
+
+### Fusion layout templates — still viable
+
+`ImportFusionComp(path)` is confirmed present. Pre-built `.comp` files (split-v,
+pip-corner, etc.) can be applied to clips without needing to write keyframes:
+
+```python
+video_item.ImportFusionComp('/path/to/split-v.comp')
+```
+
+This is the implementation path for layout templates — design in Fusion, export as
+`.comp`, apply via API. No keyframe writes required.
+
 ### GetProperty does accept a frame argument
 
 ```python
@@ -698,21 +766,21 @@ Smooth animated tracking is not.
 
 ## Known Limitations
 
-### 1. Audio volume is write-only — confirmed broken in 20.3.2
+### 1. Audio volume control is not possible — confirmed in 20.3.2
 
-`GetProperty` returns `{}` for audio clips; all keyed lookups return `None`.
-This is unchanged from 20.0.0.49. `GetVolume`/`SetVolume` do not exist.
-`SetProperty("volume", db)` does not raise, but the value cannot be read back.
+`SetProperty("volume", db)` on audio `TimelineItem` does not raise, but **does not
+commit** — verified visually. Clip volumes are unchanged in the Resolve UI after the
+call. `GetProperty` returns `{}` for all audio items. `GetVolume`/`SetVolume` are
+absent. All Fairlight-specific methods (`GetFairlightAudioClips`, `GetAudioMapping`,
+`GetFairlightAudioLoudness`) are also absent.
 
-**Design implication for NormalizePass:** always measure via rendered WAV,
-treat the existing clip volume as unknown, and reset all clips to 0 dB before
-measuring so each run is idempotent. Do NOT add a delta to the unreadable current value.
+**There is no Python API path to adjust clip volume, normalize loudness, or duck
+music.** `NormalizePass` and `DuckPass` as currently written do nothing.
 
-### 2. No Fairlight automation keyframe access
+### 2. No Fairlight automation curves
 
-The API has no path to Fairlight automation curves. Volume is a single per-clip
-scalar, not a keyframed envelope. Duck pass produces step-function volume changes,
-not smooth fades.
+No path to per-clip volume envelopes. If audio volume control becomes available in a
+future version, it will still be step-function only — smooth fades are not scriptable.
 
 ### 3. GetRenderSettings is absent
 
@@ -748,22 +816,20 @@ Always glob `f"{stem}*.wav"` rather than assuming an exact filename.
 
 | # | Question | Status |
 |---|----------|--------|
-| 1 | Does `SetProperty("volume", db)` actually commit the value in the Resolve UI? | **Unverified visually** — readback confirmed broken; needs manual UI check after a pass run |
-| 2 | What is the full dict returned by `video_item.GetProperty()`? | Pan, Tilt, ZoomX/Y, ZoomGang, RotationAngle, AnchorPointX/Y, opacity confirmed — full list needs a clip with all properties set |
+| 1 | `SetProperty("volume")` — does it commit? | **[confirmed NO]** — visually verified; clips unchanged after call |
+| 2 | Full dict from `video_item.GetProperty()` | Pan, Tilt, ZoomX/Y, ZoomGang, RotationAngle, AnchorPointX/Y, opacity confirmed — full list needs a clip with all properties set |
 | 3 | `GetIsTrackEnabled` | **[confirmed]** → `True` / `False` |
 | 4 | `GetNodeGraph()` | **[confirmed]** — see Color API section |
 | 5 | MediaPool folder structure | **[confirmed]** — 00_Timelines / 01_Footage / 02_Audio / 03_Graphics / 04_Project_Files / 05_Exports |
 | 6 | `TranscribeAudio` args and behavior | Not probed |
 | 7 | `GetVersion()` vs `GetVersionString()` | **[confirmed]** — `GetVersion()` → `[20, 3, 2, 9, '']`; `GetVersionString()` → `'20.3.2.9'` |
-| 8 | `GetRenderJobStatus` — done value `"Complete"` or `"Completed"`? | Code uses `"Complete"` — verify against a real render |
-| 9 | `SetProperty` round-trip on video items | **[confirmed]** — Pan, Tilt, ZoomX, ZoomY, RotationAngle all round-trip correctly |
+| 8 | `GetRenderJobStatus` done value | Code uses `"Complete"` — verify against a real render |
+| 9 | `SetProperty` round-trip on video items | **[confirmed]** — Pan, Tilt, ZoomX, ZoomY, RotationAngle all round-trip |
 | 10 | Valid `SetRenderSettings` keys beyond the 5 confirmed | Full key list from Resolve docs or trial |
-| 11 | `NodeGraph.SetLUT(?)` — exact signature and which node it targets | Not yet called with args |
-| 12 | `NodeGraph.ApplyGradeFromDRX(?)` — signature, and what does it accept (path? still object?) | Not yet called |
-| 13 | `GetProperty(key, frame)` — does it return a value (not `False`) when animation IS set? | Tested only on un-animated clips; `False` = no keyframe at that frame |
-| 14 | Does `GetProperty(key)` return a `{frame: value}` dict when animation is set on the property? | Would unlock read-back of existing keyframe data |
-| 15 | `TimelineItem.SetLUT()` vs `NodeGraph.SetLUT()` — are these the same operation? | Both confirmed present but not yet called |
-| 16 | `CopyGrades()` on TimelineItem — what does it accept? Can it copy from a still? | Not probed |
+| 11 | `NodeGraph.SetLUT` signature | **[confirmed]** — `SetLUT(path)` and `SetLUT(node_index, path)` both accepted; visual commit unverified |
+| 12 | `NodeGraph.ApplyGradeFromDRX` signature | **[confirmed]** — `ApplyGradeFromDRX(path, node_index)`; visual commit unverified |
+| 13 | `GetProperty(key, frame)` with animation set | `False` on un-animated clips — untested on animated clips |
+| 14 | `CopyGrades()` args | Not probed |
 
 ---
 

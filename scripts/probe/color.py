@@ -111,9 +111,38 @@ def probe_nodegraph(ng) -> None:
                 call("  GetCDL()", node.GetCDL) if getattr(node, "GetCDL", None) else None
                 call("  GetType()", node.GetType) if getattr(node, "GetType", None) else None
 
-    # LUT export — check signature
+    # GetLUT — read current LUT path (no args)
+    if getattr(ng, "GetLUT", None):
+        subsection("GetLUT() — read current LUT assignment")
+        call("GetLUT()", ng.GetLUT)
+        call("GetLUT(1)", ng.GetLUT, 1)  # try with node index
+
+    # SetLUT — test with a nonsense path to discover signature (will fail but shows arg count)
+    if getattr(ng, "SetLUT", None):
+        subsection("SetLUT — signature discovery (safe: bad path expected to return False)")
+        for args in [("/nonexistent.cube",), (1, "/nonexistent.cube"), (0, "/nonexistent.cube")]:
+            try:
+                result = ng.SetLUT(*args)
+                print(f"  SetLUT{args} → {result!r}")
+            except TypeError as e:
+                print(f"  SetLUT{args} → TypeError: {e}  [wrong arg count]")
+            except Exception as e:
+                print(f"  SetLUT{args} → {type(e).__name__}: {e}")
+
+    # ApplyGradeFromDRX — discover signature the same way
+    if getattr(ng, "ApplyGradeFromDRX", None):
+        subsection("ApplyGradeFromDRX — signature discovery")
+        for args in [("/nonexistent.drx",), ("/nonexistent.drx", 0), ("/nonexistent.drx", 1)]:
+            try:
+                result = ng.ApplyGradeFromDRX(*args)
+                print(f"  ApplyGradeFromDRX{args} → {result!r}")
+            except TypeError as e:
+                print(f"  ApplyGradeFromDRX{args} → TypeError: {e}  [wrong arg count]")
+            except Exception as e:
+                print(f"  ApplyGradeFromDRX{args} → {type(e).__name__}: {e}")
+
     if getattr(ng, "ExportLUT", None):
-        subsection("ExportLUT — method present (not called to avoid writing files)")
+        subsection("ExportLUT present (not called — would write a file)")
         print("  ExportLUT exists. Typical call: ng.ExportLUT(path, 'cube', 33)")
 
 

@@ -21,7 +21,7 @@ except ImportError:
         "Is Resolve running and PYTHONPATH set to its scripting directory?"
     )
 
-from . import app, color, items, keyframes, media_pool, pm, project, timeline
+from . import app, color, fairlight, fusion, items, keyframes, media_pool, pm, project, timeline
 from ._fmt import W
 
 
@@ -58,13 +58,17 @@ def main() -> None:
 
     media_pool.probe(proj)
 
-    # Color and keyframe probes require a video item
+    # Fairlight audio probe
+    fairlight.probe(tl)
+
+    # Color, keyframe, and Fusion probes require a video item
     video_item = _first_video_item(tl)
     if video_item is None:
-        print("\n  [color/keyframe probes skipped — no video clips on timeline]")
+        print("\n  [color/keyframe/fusion probes skipped — no video clips on timeline]")
     else:
         color.probe(video_item, proj)
         keyframes.probe(video_item)
+        fusion.probe(video_item)
 
     print(f"\n{'=' * W}")
     print("  Probe complete.")
