@@ -13,6 +13,11 @@ def get_resolve():
     return dvr.scriptapp("Resolve")
 
 
+def open_page(page: str) -> None:
+    """Switch Resolve to the named page ("edit", "fairlight", "deliver", etc.)."""
+    get_resolve().OpenPage(page)
+
+
 def get_project_manager():
     return get_resolve().GetProjectManager()
 

@@ -220,19 +220,19 @@ All pass `run()` methods receive a `timeline` object from `get_current_timeline(
 |---|---|---|
 | `splice check` | **Working** | Full Resolve bridge |
 | `splice script` (teleprompter) | **Working** | Tkinter overlay, scroll controls |
-| `splice reframe track` | **Working** | OpenCV CSRT tracker, HOG person detection |
+| `splice reframe track` | **Broken** | CSRT tracker runs and generates keyframe data, but all keyframe write methods (`AddKeyframe`, `SetPropertyKeyframe`, etc.) are absent in Resolve 20. Tracking output has no write path. |
 | Pass protocol + Pipeline | **Working** | `core.py` |
 | CLI shape (all commands) | **Working** | All commands registered, help text correct |
-| `NormalizePass` | Stub | Needs: Resolve audio export → pyloudnorm → gain apply |
-| `DuckPass` | Stub | Needs: RMS silence detection → keyframe automation on music track |
-| `AnomalyPass` | Stub | Needs: waveform scan for clipping + silence gaps |
-| `LUTPass` | Stub | Needs: Resolve color page LUT node API |
-| `AWBPass` | Stub | Needs: Resolve color page auto-balance API |
+| `NormalizePass` | **Broken** | `SetProperty("volume")` does not commit on audio items in Resolve 20 — visually verified. Pass runs without error but clips are unchanged. |
+| `DuckPass` | **Broken** | Same root cause as NormalizePass — audio volume writes are silently discarded. |
+| `AnomalyPass` | **Working** | Vectorised peak scan for clipping + RMS-frame silence gap detection, all tracks |
+| `LUTPass` | **Working** | Copies LUT to Resolve's LUT directory, calls `RefreshLUTList()`, then `NodeGraph.SetLUT(1, path)` per clip. See `docs/resolve_api.md` for constraints. |
+| `AWBPass` | **Not possible** | Auto white balance has no Python API surface in Resolve 20. |
 | `GradePass` | Stub | Needs: Resolve gallery still API |
 | `IntroPass` / `OutroPass` | Stub | Needs: Resolve media pool insert API |
 | `LowerThirdsPass` | Stub | Needs: Fusion title comp or Power Bin item API |
 | `LayoutApplier` | Stub | Needs: Fusion comp node construction per layout |
-| `SilenceDetector` | Stub | Needs: soundfile + RMS threshold logic |
+| `SilenceDetector` | **Working** | 50ms RMS frames via numpy + standard `wave` module; no soundfile dependency |
 | `CutAdvisor` | Stub | Needs: SilenceDetector + OpenCV frame-diff |
 
 "Stub" means the CLI command is reachable and the pass object is constructable, but calling `.run()` raises `NotImplementedError`. The scaffolding and configuration contract is in place — implementation fills in the `run()` body.
@@ -243,15 +243,15 @@ All pass `run()` methods receive a `timeline` object from `get_current_timeline(
 
 The highest-value, lowest-complexity path:
 
-1. **`NormalizePass`** — the Resolve audio export API is documented and straightforward. pyloudnorm is already installed. This unlocks the most common use case immediately.
+1. **`IntroPass` / `OutroPass`** — `MediaPool.AppendToTimeline()` is confirmed present. The main design decision is how to look up the source clip (by name, by path, or by UUID).
 
-2. **`DuckPass`** — depends on silence detection (straightforward RMS on the exported WAV from step 1). The output is automation keyframes written to Resolve's track volume via the scripting API.
+2. **`LayoutApplier`** — `TimelineItem.ImportFusionComp(path)` is confirmed. Build layout presets as `.comp` files in Resolve's Fusion page, export once, apply via the API with no keyframe writes required.
 
-3. **`LUTPass`** — Resolve's color API exposes `SetLUT()` on clip items. Single API call per clip.
+3. **`LayoutApplier`** — build one Fusion comp per preset in Resolve, export as `.setting` files, inject via the scripting API. Manual setup once; automated from there.
 
-4. **`LayoutApplier`** — build one Fusion comp per preset in Resolve, export as `.setting` files, inject via the scripting API. Manual setup once; automated from there.
+4. **`CutAdvisor`** — `SilenceDetector` is now implemented; add the OpenCV frame-diff scene change pass and merge with silence windows to produce ranked cut hints.
 
-5. **`IntroPass` / `OutroPass`** — Resolve media pool insert is well-documented. The main design decision is how to handle the media pool item lookup (by name, by path, or by UUID).
+5. **Smooth ducking** — `DuckPass` applies per-clip volumes rather than smooth automation curves because the Resolve Python scripting API does not expose Fairlight automation keyframes. True attack/release ducking would require driving Resolve's Fairlight API or a third-party DAW automation format.
 
 ---
 

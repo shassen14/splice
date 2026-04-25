@@ -193,6 +193,7 @@ every audio pass**.
 | `AddColorGroup(name)` | ColorGroup | **[confirmed present]** |
 | `DeleteColorGroup(cg)` | `bool` | **[confirmed present]** |
 | `GetPresetList()` | unknown | **[confirmed present, not called]** |
+| `RefreshLUTList()` | `bool` | **[confirmed working]** — refreshes Resolve's internal LUT cache; must be called after copying a new `.cube` file into the LUT directory before `SetLUT` will recognise it |
 
 **Absent in Resolve 20:** `GetRenderSettings`, `GetColorGroupList`
 
@@ -579,8 +580,8 @@ for folder in root.GetSubFolderList():
 | Method | Returns | Notes |
 |--------|---------|-------|
 | `GetNodeGraph()` | NodeGraph | **[confirmed]** — present on both video and audio items |
-| `GetLUT()` | `str` | **[confirmed]** — `ng.GetLUT()` → `None` when no LUT assigned; `ng.GetLUT(1)` → `''` |
-| `SetLUT(path)` | `bool` | **[confirmed callable, visual result unverified]** — returns `False` for bad path; may also accept `SetLUT(node_index, path)` |
+| `GetLUT(node)` | `str` | **[confirmed]** — `clip.GetLUT(1)` → `''` when no LUT on node 1; returns relative path string after SetLUT succeeds |
+| `SetLUT(node, path)` | `bool` | **[confirmed working]** — see SetLUT section below |
 | `CopyGrades()` | unknown | **[confirmed present, not called]** — args unknown |
 
 **All absent on TimelineItem:** `AutoBalance`, `AutoColor`, `ColorBalance`, `ResetGrade`,
@@ -592,36 +593,79 @@ scriptable. `AWBPass` cannot be implemented via the Python API.
 
 ### NodeGraph object
 
-Returned by `TimelineItem.GetNodeGraph()`.
+Returned by `TimelineItem.GetNodeGraph()`. The same methods are also available directly
+on `TimelineItem` (`clip.SetLUT`, `clip.GetLUT`, etc.) — both surfaces behave identically.
 
-| Method | Notes |
-|--------|-------|
-| `SetLUT(path)` | `bool` | **[confirmed callable]** — `ng.SetLUT('/path.cube')` → `False` for bad path, likely `True` for valid. Also accepts `ng.SetLUT(node_index, path)` |
-| `GetLUT()` | `str\|None` | **[confirmed]** — `None` when no LUT; `ng.GetLUT(1)` → `''` when node 1 has none |
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `GetNumNodes()` | `int` | **[confirmed]** — number of color nodes on the clip; typically 1 for ungraded clips |
+| `SetLUT(node, path)` | `bool` | **[confirmed working]** — see SetLUT section below |
+| `GetLUT(node)` | `str\|None` | **[confirmed]** — `None` for invalid node; `''` for valid node with no LUT; relative path string after SetLUT succeeds |
 | `ApplyGradeFromDRX(path, node_index)` | `bool` | **[confirmed callable]** — `ng.ApplyGradeFromDRX('/path.drx', 1)` → `False` for bad path. 1-arg form returns `None` — use 2-arg form |
-| `GetNodeLabel()` | `str` | **[confirmed present, not called]** |
-| `SetNodeEnabled(bool)` | `bool` | **[confirmed present, not called]** |
+| `GetNodeLabel(node)` | `str` | **[confirmed present, not called]** |
+| `SetNodeEnabled(node, bool)` | `bool` | **[confirmed present, not called]** |
+| `GetToolsInNode(node)` | unknown | **[confirmed present]** — returns `None` in practice; purpose unclear |
+| `GetNodeCacheMode(node)` | unknown | **[confirmed present, not called]** |
+| `SetNodeCacheMode(node, mode)` | unknown | **[confirmed present, not called]** |
+| `ResetAllGrades()` | unknown | **[confirmed present, not called]** |
+| `ApplyArriCdlLut(...)` | unknown | **[confirmed present, not called]** |
 
 **All absent on NodeGraph:** `GetNodeCount`, `GetNode`, `GetNodeByIndex`, `AddNode`,
 `DeleteNode`, `ExportLUT`, `Reset`, `SetNodeLabel`, `GetNodeEnabled`.
 
-Individual nodes cannot be addressed. `SetLUT` and `ApplyGradeFromDRX` operate at
-the graph level (or target a specific node by 1-based index as the first arg).
+### SetLUT — confirmed working, four constraints
 
-### SetLUT and ApplyGradeFromDRX — caveat
+Tested with a hand-generated `.cube` file against Resolve 20.3.2.9. All four constraints
+must be met for `SetLUT` to return `True`:
 
-Both calls return `False` for a nonexistent path, not a `TypeError` — the signatures
-are confirmed. Whether they **visually commit** in Resolve's Color page is unverified.
-The same silent-discard pattern seen with `SetProperty("volume")` on audio items may
-apply here. Treat as unverified until tested with a real `.cube` / `.drx` file and
-the Color page inspected manually.
+**1. Two-argument form only.**
+`SetLUT(node_index, path)` works. `SetLUT(path)` (1-arg form) always returns `False`.
+
+**2. LUT file must be inside Resolve's system LUT directory.**
+Absolute paths outside this directory are rejected even if the file exists.
+```
+macOS:   /Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT/
+Windows: C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\LUT\
+```
+Copy the file there first. Subdirectories are fine — Resolve returns a path relative to
+the LUT root in `GetLUT()` (e.g. `"Film Looks/Rec709 Fujifilm 3513DI D65.cube"`).
+
+**3. `project.RefreshLUTList()` must be called after copying a new file.**
+Resolve caches its LUT list at startup. Newly copied files are invisible until
+`RefreshLUTList()` is called. Without it, `SetLUT` returns `False` even for a valid path.
+
+**4. LUT must be 33×33×33 and use `LUT_3D_INPUT_RANGE` header.**
+`LUT_3D_SIZE 4` is silently rejected. `DOMAIN_MIN`/`DOMAIN_MAX` headers also cause
+rejection. Use the same format as Resolve's built-in LUTs:
+```
+# comment (optional)
+LUT_3D_SIZE 33
+LUT_3D_INPUT_RANGE 0.0 1.0
+
+<R G B per line, 33³ = 35937 entries>
+```
+
+**Working pattern (used in `LUTPass`):**
 
 ```python
+import shutil
+from pathlib import Path
+
+RESOLVE_LUT_DIR = Path("/Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT")
+
+dest = RESOLVE_LUT_DIR / Path(lut_path).name
+if not dest.exists():
+    shutil.copy2(lut_path, dest)
+
+project.RefreshLUTList()
+
 ng = video_item.GetNodeGraph()
-ng.SetLUT('/path/to/grade.cube')           # 1-arg: applies to graph
-ng.SetLUT(1, '/path/to/grade.cube')        # 2-arg: targets node 1
-ng.ApplyGradeFromDRX('/path/to/grade.drx', 1)  # path + node index
+ok = ng.SetLUT(1, str(dest))   # True on success
+lut_readback = ng.GetLUT(1)    # → "splice_test_warm.cube" (relative to LUT root)
 ```
+
+`ApplyGradeFromDRX` requires separate verification — the same constraints likely apply
+but have not been tested with a real `.drx` file.
 
 ### Gallery
 
@@ -826,7 +870,7 @@ Always glob `f"{stem}*.wav"` rather than assuming an exact filename.
 | 8 | `GetRenderJobStatus` done value | Code uses `"Complete"` — verify against a real render |
 | 9 | `SetProperty` round-trip on video items | **[confirmed]** — Pan, Tilt, ZoomX, ZoomY, RotationAngle all round-trip |
 | 10 | Valid `SetRenderSettings` keys beyond the 5 confirmed | Full key list from Resolve docs or trial |
-| 11 | `NodeGraph.SetLUT` signature | **[confirmed]** — `SetLUT(path)` and `SetLUT(node_index, path)` both accepted; visual commit unverified |
+| 11 | `NodeGraph.SetLUT` — does it visually commit? | **[confirmed YES]** — `SetLUT(node_index, path)` commits; see SetLUT section. Four constraints: 2-arg form, LUT in Resolve dir, `RefreshLUTList()` first, 33×33×33 size. |
 | 12 | `NodeGraph.ApplyGradeFromDRX` signature | **[confirmed]** — `ApplyGradeFromDRX(path, node_index)`; visual commit unverified |
 | 13 | `GetProperty(key, frame)` with animation set | `False` on un-animated clips — untested on animated clips |
 | 14 | `CopyGrades()` args | Not probed |
